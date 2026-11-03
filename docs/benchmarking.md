@@ -1,0 +1,3 @@
+# Benchmarking
+
+Run `python scripts/benchmark.py --count 100` with the server running. It reports observed HTTP API median/P95 latency, end-to-end event ingestion throughput, ingestion+database-write latency (combined path, not isolated SQL), and process RSS. Run `python scripts/benchmark_websocket.py --count 50` to measure a single dashboard client's HTTP-to-broadcast round-trip latency. To test multiple clients, launch separate harness processes with unique base URLs/server instances or extend the harness to connect more sockets; the existing automated test verifies two connected clients receive broadcasts, but no concurrent stress benchmark is claimed. Results depend on host, DB and workload. Run these on the target setup before sharing performance claims.

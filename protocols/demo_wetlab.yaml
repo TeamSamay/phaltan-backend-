@@ -1,0 +1,12 @@
+protocol_id: demo-wetlab
+version: "1.0"
+name: Demo Five-Step Wet-Lab Protocol
+kind: demonstration
+notice: Mock demonstration only; not an official BAS protocol.
+minimum_confidence: 0.60
+steps:
+  - {step_id: STEP_01, name: Workspace Inspection & Sanitization, sequence: 1}
+  - {step_id: STEP_02, name: Sample Container Unsealing, sequence: 2}
+  - {step_id: STEP_03, name: Reagent Aspiration, sequence: 3}
+  - {step_id: STEP_04, name: Liquid Dispensation, sequence: 4}
+  - {step_id: STEP_05, name: Container Sealing, sequence: 5}
