@@ -3,6 +3,10 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from dotenv import load_dotenv
+
+
+load_dotenv()
 
 
 @dataclass(frozen=True)
@@ -20,6 +24,14 @@ class Settings:
     max_request_bytes: int = int(os.getenv("SUTRA_MAX_REQUEST_BYTES", "1048576"))
     rate_limit_per_minute: int = int(os.getenv("SUTRA_RATE_LIMIT_PER_MINUTE", "120"))
     protocol_path: Path = Path(os.getenv("SUTRA_PROTOCOL_PATH", "protocols/demo_wetlab.yaml"))
+
+    def __post_init__(self) -> None:
+        if self.port < 1 or self.port > 65535:
+            raise ValueError("SUTRA_PORT must be between 1 and 65535")
+        if self.max_request_bytes < 1:
+            raise ValueError("SUTRA_MAX_REQUEST_BYTES must be positive")
+        if self.rate_limit_per_minute < 1:
+            raise ValueError("SUTRA_RATE_LIMIT_PER_MINUTE must be positive")
 
 
 settings = Settings()

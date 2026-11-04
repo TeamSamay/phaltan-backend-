@@ -10,6 +10,7 @@ from uuid import uuid4
 import psutil
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
@@ -44,7 +45,7 @@ async def lifespan(application: FastAPI):
 app = FastAPI(title="SUTRA Backend", version="1.0.0", description="Independent SUTRA event ingestion and experiment backend", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=list(settings.cors_origins), allow_credentials=False,
                    allow_methods=["GET", "POST", "OPTIONS"], allow_headers=["*"])
-limiter = RateLimiter(settings.rate_limit_per_minute)
+app.state.request_limiter = RateLimiter(settings.rate_limit_per_minute)
 
 
 def current_engine(db: Session) -> ExperimentEngine:
@@ -66,14 +67,20 @@ async def request_controls(request: Request, call_next):
         return __import__("fastapi").responses.JSONResponse(status_code=413, content={"error": {"code": "request_too_large", "message": "Request body exceeds configured limit"}})
     if request.url.path.startswith("/api/"):
         try:
-            limiter.check(request.client.host if request.client else "unknown")
+            key = request.client.host if request.client else "unknown"
+            request.app.state.request_limiter.check(key)
         except HTTPException as exc:
             return __import__("fastapi").responses.JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
+    response = None
     try:
-        return await call_next(request)
+        response = await call_next(request)
     except Exception:
         logger.exception("Unhandled request exception")
-        return __import__("fastapi").responses.JSONResponse(status_code=500, content={"error": {"code": "internal_error", "message": "Internal server error"}})
+        response = __import__("fastapi").responses.JSONResponse(status_code=500, content={"error": {"code": "internal_error", "message": "Internal server error"}})
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
 
 
 @app.exception_handler(HTTPException)
@@ -88,7 +95,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     from fastapi.responses import JSONResponse
     return JSONResponse(status_code=422, content={"error": {
         "code": "validation_error", "message": "Request validation failed",
-        "details": exc.errors(),
+        "details": jsonable_encoder(exc.errors()),
     }})
 
 
@@ -119,18 +126,28 @@ def register_device(body: DeviceRegister, db: Session = Depends(get_db)):
         device.metadata_json = json.dumps(body.metadata)
         if not settings.dev_auth:
             device.token_hash = token_hash(token)
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    db.refresh(device)
     return {"device_id": device.device_id, "status": device.status, "auth_mode": "development" if settings.dev_auth else "token", "device_token": token if not settings.dev_auth else None}
 
 
 @app.post("/api/v1/devices/heartbeat")
 async def device_heartbeat(body: DeviceHeartbeat, db: Session = Depends(get_db), x_device_token: str | None = Header(default=None)):
-    validate_device_token(db, body.device_id, x_device_token)
     device = db.get(Device, body.device_id)
     if not device:
         raise HTTPException(404, detail={"code": "device_not_found", "message": "Register device first"})
+    validate_device_token(db, body.device_id, x_device_token)
     device.last_seen_at, device.status = datetime.now(timezone.utc), body.status
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    db.refresh(device)
     await manager.broadcast({"type": "device.heartbeat", "device_id": device.device_id, "status": device.status, "timestamp": iso(device.last_seen_at)})
     return {"device_id": device.device_id, "status": device.status, "last_seen_at": iso(device.last_seen_at)}
 
@@ -139,6 +156,8 @@ async def device_heartbeat(body: DeviceHeartbeat, db: Session = Depends(get_db),
 def list_devices(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0), status: str | None = None, db: Session = Depends(get_db)):
     query = db.query(Device)
     if status:
+        if status not in {"online", "busy", "offline"}:
+            raise HTTPException(422, detail={"code": "invalid_device_status", "message": "status must be online, busy, or offline"})
         query = query.filter(Device.status == status)
     total = query.count()
     items = query.order_by(Device.device_id).offset(offset).limit(limit).all()
@@ -155,13 +174,11 @@ def get_device(device_id: str, db: Session = Depends(get_db)):
 
 @app.post("/api/v1/experiments", status_code=201)
 async def create_experiment(body: ExperimentCreate, db: Session = Depends(get_db)):
-    protocol = ensure_protocol(db, settings.protocol_path)
+    ensure_protocol(db, settings.protocol_path)
     protocol_id, version = body.protocol_id, body.protocol_version
-    if protocol_id != protocol.protocol_id or version != protocol.version:
-        if not db.get(ExperimentProtocol, (protocol_id, version)):
-            raise HTTPException(404, detail={"code": "protocol_not_found", "message": "Protocol version not found"})
-    else:
-        protocol = ensure_protocol(db, settings.protocol_path)
+    protocol_record = db.get(ExperimentProtocol, (protocol_id, version))
+    if not protocol_record:
+        raise HTTPException(404, detail={"code": "protocol_not_found", "message": "Protocol version not found"})
     experiment_id = body.experiment_id or f"exp-{uuid4().hex[:12]}"
     if db.get(Experiment, experiment_id):
         raise HTTPException(409, detail={"code": "experiment_exists", "message": "Experiment ID already exists"})
@@ -171,7 +188,12 @@ async def create_experiment(body: ExperimentCreate, db: Session = Depends(get_db
     definition = json.loads(db.get(ExperimentProtocol, (protocol_id, version)).definition_json)
     for step in definition["steps"]:
         db.add(ExperimentStep(experiment_id=experiment_id, step_id=step["step_id"], step_name=step["name"], sequence=step["sequence"], status="pending"))
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    db.refresh(record)
     return {"experiment_id": experiment_id, "name": record.name, "protocol_id": protocol_id, "protocol_version": version, "status": record.status, "created_at": iso(record.created_at)}
 
 
@@ -179,10 +201,13 @@ async def create_experiment(body: ExperimentCreate, db: Session = Depends(get_db
 def list_experiments(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0), status: str | None = None, sort: str = Query("created_at", pattern="^(created_at|name|status)$"), db: Session = Depends(get_db)):
     query = db.query(Experiment)
     if status:
+        if status not in {"created", "running", "stopped", "completed"}:
+            raise HTTPException(422, detail={"code": "invalid_experiment_status", "message": "status must be created, running, stopped, or completed"})
         query = query.filter(Experiment.status == status)
     total = query.count()
     column = getattr(Experiment, sort)
-    rows = query.order_by(desc(column)).offset(offset).limit(limit).all()
+    ordering = column.asc() if sort == "name" else desc(column)
+    rows = query.order_by(ordering).offset(offset).limit(limit).all()
     return pagination([{"experiment_id": x.experiment_id, "name": x.name, "status": x.status, "protocol_id": x.protocol_id, "created_at": iso(x.created_at)} for x in rows], total, limit, offset)
 
 
@@ -211,7 +236,12 @@ async def start_experiment(experiment_id: str, db: Session = Depends(get_db)):
     if x.status == "completed":
         raise HTTPException(409, detail={"code": "already_completed", "message": "Completed experiment cannot be restarted"})
     x.status, x.started_at, x.stopped_at = "running", datetime.now(timezone.utc), None
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    db.refresh(x)
     await manager.broadcast({"type": "experiment.status", "experiment_id": x.experiment_id, "status": x.status})
     return {"experiment_id": x.experiment_id, "status": x.status, "started_at": iso(x.started_at)}
 
@@ -224,7 +254,12 @@ async def stop_experiment(experiment_id: str, db: Session = Depends(get_db)):
     if x.status != "running":
         raise HTTPException(409, detail={"code": "not_running", "message": "Only running experiments can be stopped"})
     x.status, x.stopped_at = "stopped", datetime.now(timezone.utc)
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    db.refresh(x)
     await manager.broadcast({"type": "experiment.status", "experiment_id": x.experiment_id, "status": x.status})
     return {"experiment_id": x.experiment_id, "status": x.status, "stopped_at": iso(x.stopped_at)}
 
@@ -281,18 +316,17 @@ def list_protocols(db: Session = Depends(get_db)):
 def create_protocol(body: ProtocolCreate, db: Session = Depends(get_db)):
     if db.get(ExperimentProtocol, (body.protocol_id, body.version)):
         raise HTTPException(409, detail={"code": "protocol_exists", "message": "Protocol/version already exists"})
-    for index, step in enumerate(body.steps, 1):
-        if not all(key in step for key in ("step_id", "name")):
-            raise HTTPException(422, detail={"code": "invalid_protocol", "message": "Each step requires step_id and name"})
-        step.setdefault("sequence", index)
+    steps = [step.model_dump() for step in body.steps]
     row = ExperimentProtocol(protocol_id=body.protocol_id, version=body.version, name=body.name,
-        description=body.description, definition_json=json.dumps({"steps": body.steps, "protocol_id": body.protocol_id, "version": body.version, "name": body.name}))
+        description=body.description, definition_json=json.dumps({"steps": steps, "protocol_id": body.protocol_id, "version": body.version, "name": body.name}))
     db.add(row); db.commit()
+    db.refresh(row)
     return {"protocol_id": row.protocol_id, "version": row.version, "name": row.name}
 
 
 @app.get("/api/v1/protocols/{protocol_id}")
 def get_protocol(protocol_id: str, version: str = "1.0", db: Session = Depends(get_db)):
+    ensure_protocol(db, settings.protocol_path)
     x = db.get(ExperimentProtocol, (protocol_id, version))
     if not x:
         raise HTTPException(404, detail={"code": "protocol_not_found", "message": "Protocol not found"})
@@ -326,7 +360,11 @@ async def acknowledge_deviation(deviation_id: str, body: AcknowledgeRequest, db:
     now = datetime.now(timezone.utc)
     x.acknowledged, x.acknowledged_by, x.acknowledged_at = True, body.operator_id, now
     db.add(OperatorAcknowledgement(deviation_id=deviation_id, operator_id=body.operator_id, note=body.note, acknowledged_at=now))
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     await manager.broadcast({"type": "deviation.acknowledged", "deviation_id": deviation_id, "operator_id": body.operator_id})
     return {"deviation_id": deviation_id, "acknowledged": True, "acknowledged_at": iso(now)}
 

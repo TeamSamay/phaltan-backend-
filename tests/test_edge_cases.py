@@ -16,6 +16,16 @@ def test_out_of_order_timestamp_persisted_as_rejected_deviation(test_client):
     assert test_client.get("/api/v1/deviations").json()["total"] == 1
 
 
+def test_future_timestamp_non_step_event_is_rejected(test_client):
+    register(test_client); create_running_experiment(test_client)
+    future = datetime.now(timezone.utc) + timedelta(minutes=10)
+    payload = event(event_id="future-heartbeat", event_type="HEARTBEAT", step_id=None,
+                    timestamp=future.isoformat())
+    result = test_client.post("/api/v1/events", json=payload).json()
+    assert not result["accepted"]
+    assert "future" in result["processing_error"]
+
+
 def test_unknown_experiment_event_is_persisted_rejected(test_client):
     register(test_client)
     result = test_client.post("/api/v1/events", json=event(experiment_id="missing-exp", event_id="missing-event")).json()

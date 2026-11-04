@@ -29,12 +29,12 @@ py -3 -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 Copy-Item .env.example .env
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+python -m app
 ```
 
-If PowerShell blocks virtual-environment activation, use the interpreter directly: `.venv\Scripts\python.exe -m pip install -r requirements.txt`, then `.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000`.
+If PowerShell blocks virtual-environment activation, use the interpreter directly: `.venv\Scripts\python.exe -m pip install -r requirements.txt`, then `.venv\Scripts\python.exe -m app`. The host and port are read from `SUTRA_HOST` and `SUTRA_PORT`.
 
-The server initializes the SQLAlchemy tables and loads the demo protocol at startup. Local SQLite data is stored in `sutra.db` (ignored by Git).
+The server initializes the SQLAlchemy tables and loads the demo protocol at startup. Local SQLite data is stored in `sutra.db` (ignored by Git). `.env` is loaded automatically from the project root.
 
 | Resource | URL |
 |---|---|
@@ -107,6 +107,7 @@ SQLAlchemy models and database            app/models/, app/database.py
 | Path | Responsibility |
 |---|---|
 | `app/main.py` | FastAPI app, lifecycle, REST routes, request controls, WebSocket endpoint |
+| `app/__main__.py` | Configurable local startup via `python -m app` |
 | `app/config.py` | Environment-based settings |
 | `app/database.py` | SQLAlchemy engine, sessions, schema initialization |
 | `app/models/models.py` | Database tables, indexes, and uniqueness constraints |
@@ -136,6 +137,8 @@ Copy `.env.example` to `.env` and set values in your shell/IDE before starting t
 | `SUTRA_RATE_LIMIT_PER_MINUTE` | `120` | In-memory API request limit |
 | `SUTRA_PROTOCOL_PATH` | `protocols/demo_wetlab.yaml` | Default protocol definition |
 
+Startup also validates that the port is within 1–65535 and that request-size and rate-limit values are positive.
+
 In development mode, device tokens are not required. For token mode set `SUTRA_DEV_AUTH=false`: registration returns a one-time token for the `X-Device-Token` header, and the backend stores only its hash. Never commit `.env`, live tokens, or database files. This is a local MVP, not a production security certification. A real network deployment also needs TLS, managed secrets, durable rate limiting, backup/restore procedures, and security review.
 
 ## Tests and performance checks
@@ -159,7 +162,7 @@ Previously observed on the development laptop: 100-event HTTP run measured 47.18
 
 ## Database and migration path
 
-The MVP uses portable SQLAlchemy models and creates tables on startup with `Base.metadata.create_all()`. This is convenient for local development but does not migrate existing tables when columns change. Back up important data before any schema change. Before team/production use, add and review Alembic migrations. To use PostgreSQL, configure a PostgreSQL SQLAlchemy URL and install a compatible driver; test migrations and connection-pool settings before deployment.
+The MVP uses portable SQLAlchemy models and creates tables on startup with `Base.metadata.create_all()`. This is convenient for local development but does not migrate existing tables when columns change. Back up important data before any schema change. Before team/production use, add and review Alembic migrations. In-memory SQLite URLs (`sqlite://` and `sqlite:///:memory:`) share one connection pool so app sessions see the same test database. To use PostgreSQL, configure a PostgreSQL SQLAlchemy URL and install a compatible driver; test migrations and connection-pool settings before deployment.
 
 ## Contributing / fixing a bug
 

@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Any, Literal
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class DeviceRegister(BaseModel):
@@ -60,12 +60,28 @@ class AcknowledgeRequest(BaseModel):
     note: str = Field(default="", max_length=2000)
 
 
+class ProtocolStepCreate(BaseModel):
+    step_id: str = Field(min_length=1, max_length=100)
+    name: str = Field(min_length=1, max_length=200)
+    sequence: int = Field(ge=1)
+
+
 class ProtocolCreate(BaseModel):
     protocol_id: str = Field(min_length=1, max_length=100)
     version: str = Field(min_length=1, max_length=40)
     name: str = Field(min_length=1, max_length=200)
     description: str = ""
-    steps: list[dict[str, Any]] = Field(min_length=1)
+    steps: list[ProtocolStepCreate] = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def steps_must_have_unique_ids_and_sequences(self):
+        step_ids = [step.step_id for step in self.steps]
+        sequences = [step.sequence for step in self.steps]
+        if len(step_ids) != len(set(step_ids)):
+            raise ValueError("step_id values must be unique within a protocol")
+        if len(sequences) != len(set(sequences)):
+            raise ValueError("step sequence values must be unique within a protocol")
+        return self
 
 
 class Pagination(BaseModel):

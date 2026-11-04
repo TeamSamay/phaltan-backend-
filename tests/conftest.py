@@ -1,6 +1,5 @@
 import json
 from contextlib import asynccontextmanager
-from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -9,6 +8,7 @@ from sqlalchemy.pool import StaticPool
 from app.database import Base, get_db
 from app.main import app
 from app.models.models import ExperimentProtocol
+from app.services.rate_limit import RateLimiter
 
 
 @pytest.fixture()
@@ -37,17 +37,25 @@ def test_client():
 
     app.dependency_overrides[get_db] = override_get_db
     original_lifespan = app.router.lifespan_context
+    original_limiter = app.state.request_limiter if hasattr(app.state, "request_limiter") else None
+    app.state.request_limiter = RateLimiter(limit=10000)
     @asynccontextmanager
     async def no_lifespan(application):
         yield
 
     app.router.lifespan_context = no_lifespan
-    with TestClient(app) as client:
-        yield client
-    app.dependency_overrides.clear()
-    app.router.lifespan_context = original_lifespan
-    Base.metadata.drop_all(engine)
-    engine.dispose()
+    try:
+        with TestClient(app) as client:
+            yield client
+    finally:
+        app.dependency_overrides.clear()
+        app.router.lifespan_context = original_lifespan
+        if original_limiter is None:
+            del app.state.request_limiter
+        else:
+            app.state.request_limiter = original_limiter
+        Base.metadata.drop_all(engine)
+        engine.dispose()
 
 
 def register(client: TestClient, device_id="test-device"):

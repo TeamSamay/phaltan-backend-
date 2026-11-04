@@ -36,15 +36,20 @@ class ExperimentEngine:
         if not step_id or step_id not in self.step_by_id:
             return False, "unknown_step", f"Unknown or missing step_id: {step_id!r}"
         step = self.step_by_id[step_id]
-        if confidence is not None and confidence < self.protocol.minimum_confidence:
-            return False, "low_confidence", f"Confidence {confidence:.2f} is below required {self.protocol.minimum_confidence:.2f}"
+        if confidence is None or confidence < self.protocol.minimum_confidence:
+            value = "missing" if confidence is None else f"{confidence:.2f}"
+            return False, "low_confidence", f"Confidence {value} is below required {self.protocol.minimum_confidence:.2f}"
         states = {item["step_id"]: item for item in step_states}
         prior_steps = [item for item in self.protocol.steps if item["sequence"] < step["sequence"]]
         if any(states.get(item["step_id"], {}).get("status") != "completed" for item in prior_steps):
             return False, "out_of_order", f"Step {step_id} arrived before all preceding steps were completed"
         current = states.get(step_id, {}).get("status", "pending")
+        if event_type == "STEP_STARTED" and current == "started":
+            return False, "duplicate_transition", f"Step {step_id} has already been started"
         if event_type == "STEP_STARTED" and current == "completed":
             return False, "late_event", f"Cannot start already completed step {step_id}"
+        if event_type == "STEP_STARTED" and current != "pending":
+            return False, "invalid_transition", f"Cannot start step {step_id} from state {current}"
         if event_type == "STEP_COMPLETED" and current != "started":
             return False, "invalid_transition", f"Step {step_id} must be started before completion (current: {current})"
         return True, None, None
