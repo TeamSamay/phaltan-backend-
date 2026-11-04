@@ -10,6 +10,7 @@ from app.models.models import (ActivityRecord, DeviationRecord, Device, Experime
 from app.schemas.schemas import EventContract
 from app.websocket.manager import manager
 from app.services.alerts import make_alert
+from app.services.mongo_service import save_telemetry_event, save_deviation_record, upsert_device, upsert_experiment
 from modules.experiment_engine.engine import ExperimentEngine, ProtocolDefinition
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,8 @@ async def ingest_event(db: Session, event: EventContract, engine: ExperimentEngi
     db.add(event_record)
     alert = None
     experiment_completed = False
+    created_deviation: dict | None = None
+
     try:
         if protocol_error:
             event_record.processing_status = "rejected"
@@ -68,15 +71,28 @@ async def ingest_event(db: Session, event: EventContract, engine: ExperimentEngi
                 severity="warning", description=event_record.processing_error or "Experiment not found",
                 details_json=event.model_dump_json())
             db.add(dev)
+            created_deviation = {
+                "deviation_id": dev.deviation_id, "event_id": dev.event_id,
+                "experiment_id": dev.experiment_id, "device_id": dev.device_id,
+                "category": dev.category, "severity": dev.severity,
+                "description": dev.description, "details": event.model_dump()
+            }
             alert = make_alert("warning", "Experiment not found", event_record.processing_error or
                                "Event references an unknown experiment", "warning",
                                event.experiment_id, event.event_id)
         elif event.experiment_id and protocol_error:
-            db.add(DeviationRecord(deviation_id=f"dev-{uuid4().hex}", event_id=event.event_id,
+            dev = DeviationRecord(deviation_id=f"dev-{uuid4().hex}", event_id=event.event_id,
                 experiment_id=event.experiment_id, device_id=event.device_id,
                 category="unknown_protocol", severity="warning",
                 description=event_record.processing_error or "Protocol validation unavailable",
-                details_json=event.model_dump_json()))
+                details_json=event.model_dump_json())
+            db.add(dev)
+            created_deviation = {
+                "deviation_id": dev.deviation_id, "event_id": dev.event_id,
+                "experiment_id": dev.experiment_id, "device_id": dev.device_id,
+                "category": dev.category, "severity": dev.severity,
+                "description": dev.description, "details": event.model_dump()
+            }
             alert = make_alert("warning", "Protocol unavailable", event_record.processing_error or
                                "Experiment protocol validation is unavailable", "warning",
                                event.experiment_id, event.event_id)
@@ -97,9 +113,16 @@ async def ingest_event(db: Session, event: EventContract, engine: ExperimentEngi
             timestamp_error = "Event timestamp is more than five minutes in the future"
         if timestamp_error and event_record.processing_status != "rejected":
             event_record.processing_status, event_record.processing_error = "rejected", timestamp_error
-            db.add(DeviationRecord(deviation_id=f"dev-{uuid4().hex}", event_id=event.event_id,
+            dev = DeviationRecord(deviation_id=f"dev-{uuid4().hex}", event_id=event.event_id,
                 experiment_id=event.experiment_id, device_id=event.device_id, category="late_event",
-                severity="warning", description=timestamp_error, details_json=event.model_dump_json()))
+                severity="warning", description=timestamp_error, details_json=event.model_dump_json())
+            db.add(dev)
+            created_deviation = {
+                "deviation_id": dev.deviation_id, "event_id": dev.event_id,
+                "experiment_id": dev.experiment_id, "device_id": dev.device_id,
+                "category": dev.category, "severity": dev.severity,
+                "description": dev.description, "details": event.model_dump()
+            }
             alert = make_alert("warning", "Event timestamp out of order", timestamp_error,
                                "warning", event.experiment_id, event.event_id)
         if event_record.processing_status == "rejected":
@@ -111,20 +134,34 @@ async def ingest_event(db: Session, event: EventContract, engine: ExperimentEngi
             if event.requires_review:
                 error = "Step transition requires operator review and was not applied"
                 event_record.processing_status, event_record.processing_error = "rejected", error
-                db.add(DeviationRecord(deviation_id=f"dev-{uuid4().hex}", event_id=event.event_id,
+                dev = DeviationRecord(deviation_id=f"dev-{uuid4().hex}", event_id=event.event_id,
                     experiment_id=event.experiment_id, device_id=event.device_id,
                     category="needs_review", severity="warning", description=error,
-                    details_json=event.model_dump_json()))
+                    details_json=event.model_dump_json())
+                db.add(dev)
+                created_deviation = {
+                    "deviation_id": dev.deviation_id, "event_id": dev.event_id,
+                    "experiment_id": dev.experiment_id, "device_id": dev.device_id,
+                    "category": dev.category, "severity": dev.severity,
+                    "description": dev.description, "details": event.model_dump()
+                }
                 alert = make_alert("low_confidence_review", "Operator review required", error,
                                    "warning", event.experiment_id, event.event_id)
             elif experiment.status != "running":
                 error = f"Experiment is not running (status: {experiment.status})"
                 event_record.processing_status, event_record.processing_error = "rejected", error
-                db.add(DeviationRecord(deviation_id=f"dev-{uuid4().hex}", event_id=event.event_id,
+                dev = DeviationRecord(deviation_id=f"dev-{uuid4().hex}", event_id=event.event_id,
                     experiment_id=event.experiment_id, device_id=event.device_id,
                     category="experiment_completed" if experiment.status == "completed" else "experiment_not_running",
                     severity="warning", description=error,
-                    details_json=event.model_dump_json()))
+                    details_json=event.model_dump_json())
+                db.add(dev)
+                created_deviation = {
+                    "deviation_id": dev.deviation_id, "event_id": dev.event_id,
+                    "experiment_id": dev.experiment_id, "device_id": dev.device_id,
+                    "category": dev.category, "severity": dev.severity,
+                    "description": dev.description, "details": event.model_dump()
+                }
                 alert = make_alert("warning", "Experiment is not accepting step events", error,
                                    "warning", event.experiment_id, event.event_id)
             else:
@@ -138,6 +175,12 @@ async def ingest_event(db: Session, event: EventContract, engine: ExperimentEngi
                         severity="critical" if code in {"out_of_order", "unknown_step"} else "warning",
                         description=error or "Protocol validation failed", details_json=event.model_dump_json())
                     db.add(dev)
+                    created_deviation = {
+                        "deviation_id": dev.deviation_id, "event_id": dev.event_id,
+                        "experiment_id": dev.experiment_id, "device_id": dev.device_id,
+                        "category": dev.category, "severity": dev.severity,
+                        "description": dev.description, "details": event.model_dump()
+                    }
                     alert = make_alert("critical_deviation" if dev.severity == "critical" else "warning",
                         "Protocol deviation", dev.description, dev.severity, event.experiment_id, event.event_id)
                 else:
@@ -161,6 +204,12 @@ async def ingest_event(db: Session, event: EventContract, engine: ExperimentEngi
                 category="needs_review" if event.event_type == "NEEDS_REVIEW" else "ai_deviation",
                 severity="warning", description=description, details_json=event.model_dump_json())
             db.add(dev)
+            created_deviation = {
+                "deviation_id": dev.deviation_id, "event_id": dev.event_id,
+                "experiment_id": dev.experiment_id, "device_id": dev.device_id,
+                "category": dev.category, "severity": dev.severity,
+                "description": dev.description, "details": event.model_dump()
+            }
             alert = make_alert("low_confidence_review" if event.event_type == "NEEDS_REVIEW" else "warning",
                 "Review required" if event.event_type == "NEEDS_REVIEW" else "Deviation detected",
                 description, "warning", event.experiment_id, event.event_id)
@@ -194,6 +243,50 @@ async def ingest_event(db: Session, event: EventContract, engine: ExperimentEngi
         db.rollback()
         logger.exception("Event ingestion failed for event_id=%s", event.event_id)
         raise
+
+    # Sync to MongoDB asynchronously
+    try:
+        mongo_event_payload = {
+            "event_id": event.event_id,
+            "schema_version": event.schema_version,
+            "source": event.source,
+            "device_id": event.device_id,
+            "experiment_id": event.experiment_id,
+            "timestamp": event.timestamp.isoformat(),
+            "received_at": now.isoformat(),
+            "event_type": event.event_type,
+            "step_id": event.step_id,
+            "step_name": event.step_name,
+            "status": event.status,
+            "confidence": event.confidence,
+            "evidence": event.evidence,
+            "rack_coordinates": event.rack_coordinates,
+            "requires_review": event.requires_review,
+            "processing_status": event_record.processing_status,
+            "processing_error": event_record.processing_error
+        }
+        await save_telemetry_event(mongo_event_payload)
+        if created_deviation:
+            await save_deviation_record(created_deviation)
+        await upsert_device({
+            "device_id": device.device_id,
+            "name": device.name,
+            "device_type": device.device_type,
+            "status": "online",
+            "last_seen_at": now.isoformat()
+        })
+        if experiment:
+            await upsert_experiment({
+                "experiment_id": experiment.experiment_id,
+                "name": experiment.name,
+                "protocol_id": experiment.protocol_id,
+                "status": experiment.status,
+                "started_at": experiment.started_at.isoformat() if experiment.started_at else None,
+                "stopped_at": experiment.stopped_at.isoformat() if experiment.stopped_at else None
+            })
+    except Exception as mongo_err:
+        logger.debug("MongoDB synchronization skipped or failed: %s", mongo_err)
+
     if experiment_completed and experiment:
         await manager.broadcast({"type": "experiment.status", "experiment_id": experiment.experiment_id, "status": "completed"})
     summary = {"type": "event.new", "event": {"event_id": event.event_id, "event_type": event.event_type,
@@ -204,7 +297,7 @@ async def ingest_event(db: Session, event: EventContract, engine: ExperimentEngi
         await manager.broadcast({"type": "alert", "alert": alert})
         if alert.get("category") == "system_health":
             await manager.broadcast({"type": "system.health", "status": event.status or "reported",
-                                    "device_id": event.device_id})
+                                     "device_id": event.device_id})
         elif alert.get("category") == "camera_disconnected":
             await manager.broadcast({"type": "system.health", "status": "camera_disconnected",
                                      "device_id": event.device_id})

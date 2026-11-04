@@ -1,0 +1,68 @@
+version: "3.8"
+
+services:
+  mongodb:
+    image: mongo:7.0
+    container_name: sutra-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_DATABASE: sutra_db
+    volumes:
+      - sutra-mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - sutra-net
+
+  mongo-express:
+    image: mongo-express:latest
+    container_name: sutra-mongo-express
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      ME_CONFIG_MONGODB_SERVER: mongodb
+      ME_CONFIG_MONGODB_PORT: 27017
+      ME_CONFIG_BASICAUTH: "false"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - sutra-net
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sutra-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - SUTRA_ENV=production
+      - SUTRA_HOST=0.0.0.0
+      - SUTRA_PORT=8000
+      - SUTRA_MONGODB_URL=mongodb://mongodb:27017
+      - SUTRA_MONGODB_DB=sutra_db
+      - SUTRA_MONGODB_ENABLED=true
+      - SUTRA_DEV_AUTH=true
+      - SUTRA_PROTOCOL_PATH=protocols/demo_wetlab.yaml
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - sutra-net
+
+volumes:
+  sutra-mongo-data:
+    driver: local
+
+networks:
+  sutra-net:
+    driver: bridge

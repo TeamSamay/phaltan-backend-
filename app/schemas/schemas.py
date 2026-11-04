@@ -40,7 +40,7 @@ class EventContract(BaseModel):
     status: str | None = Field(default=None, max_length=30)
     confidence: float | None = Field(default=None, ge=0, le=1)
     evidence: dict[str, Any] = Field(default_factory=dict)
-    rack_coordinates: dict[str, float] | None = None
+    rack_coordinates: dict[str, Any] | None = None
     requires_review: bool = False
 
     @field_validator("timestamp")
@@ -93,3 +93,29 @@ class Pagination(BaseModel):
 
 class APIError(BaseModel):
     error: dict[str, Any]
+
+
+class EngineStartRequest(BaseModel):
+    mode: Literal["synthetic", "live", "video", "test-deviation", "benchmark"] = "synthetic"
+    source: str | None = None
+    publish: bool = True
+    headless: bool = True
+    frames: int = 0
+    port: int = 8000
+
+
+class EngineStopRequest(BaseModel):
+    force: bool = False
+
+
+class EngineStatusResponse(BaseModel):
+    is_running: bool
+    pid: int | None = None
+    status: str
+    mode: str | None = None
+    source: str | None = None
+    cpu_percent: float | None = None
+    memory_mb: float | None = None
+    uptime_seconds: float | None = None
+    started_at: str | None = None
+    recent_logs: list[str] = Field(default_factory=list)
